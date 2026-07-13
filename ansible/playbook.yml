@@ -7,8 +7,16 @@
     app_user: ubuntu
     venv_dir: /opt/myapp/.venv
     service_name: myapp
+    # DB vars are passed in via --extra-vars from the CI workflow
+    db_host: "{{ db_host }}"
+    db_port: "{{ db_port | default(5432) }}"
+    db_name: "{{ db_name | default('tododb') }}"
+    db_user: "{{ db_user | default('todoapp') }}"
+    db_password: "{{ db_password }}"
 
   tasks:
+    # ── System dependencies ────────────────────────────────────────────────────
+
     - name: Update apt cache and install system dependencies
       ansible.builtin.apt:
         name:
@@ -21,8 +29,12 @@
           - nginx
           - git
           - curl
+          - libpq-dev
+          - postgresql-client
         state: present
         update_cache: true
+
+    # ── Application directory ─────────────────────────────────────────────────
 
     - name: Create application directory
       ansible.builtin.file:
@@ -31,6 +43,8 @@
         owner: "{{ app_user }}"
         group: "{{ app_user }}"
         mode: "0755"
+
+    # ── Sync application source ───────────────────────────────────────────────
 
     - name: Synchronize application source to server
       ansible.builtin.copy:
@@ -42,6 +56,17 @@
       loop:
         - { src: "../app/", dest: "{{ app_dir }}/app/" }
         - { src: "../main.py", dest: "{{ app_dir }}/main.py" }
+
+    - name: Synchronize Alembic configuration
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0644"
+      loop:
+        - { src: "../alembic.ini", dest: "{{ app_dir }}/alembic.ini" }
+        - { src: "../alembic/", dest: "{{ app_dir }}/alembic/" }
 
     - name: Check if requirements.txt exists
       ansible.builtin.stat:
@@ -61,11 +86,18 @@
     - name: Write minimal requirements.txt if not present
       ansible.builtin.shell: |
         cat > {{ app_dir }}/requirements.txt <<'EOF'
-        fastapi>=0.100.0
-        uvicorn[standard]>=0.23.0
-        gunicorn>=21.0.0
-        python-multipart>=0.0.6
-        aiofiles>=23.0.0
+        fastapi>=0.110.0
+        uvicorn[standard]>=0.29.0
+        gunicorn>=21.2.0
+        python-dotenv>=1.0.0
+        sqlalchemy[asyncio]>=2.0.0
+        asyncpg>=0.29.0
+        psycopg2-binary>=2.9.9
+        alembic>=1.13.0
+        python-multipart>=0.0.9
+        pydantic>=2.6.0
+        pydantic-settings>=2.2.0
+        aiofiles>=23.2.1
         EOF
       args:
         creates: "{{ app_dir }}/requirements.txt"
@@ -85,6 +117,26 @@
         group: "{{ app_user }}"
         mode: "0644"
       when: public_dir.stat.exists and public_dir.stat.isdir
+
+    # ── Environment file ──────────────────────────────────────────────────────
+
+    - name: Write .env file with database credentials
+      ansible.builtin.copy:
+        dest: "{{ app_dir }}/.env"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0600"
+        content: |
+          APP_ENV=production
+          HOST=0.0.0.0
+          PORT=8000
+          DB_HOST={{ db_host }}
+          DB_PORT={{ db_port }}
+          DB_NAME={{ db_name }}
+          DB_USER={{ db_user }}
+          DB_PASSWORD={{ db_password }}
+
+    # ── Python virtualenv & dependencies ──────────────────────────────────────
 
     - name: Create Python virtual environment
       ansible.builtin.command:
@@ -107,6 +159,28 @@
         virtualenv_python: python3
       become_user: "{{ app_user }}"
 
+    # ── Alembic migrations ────────────────────────────────────────────────────
+
+    - name: Run Alembic database migrations
+      ansible.builtin.command:
+        cmd: "{{ venv_dir }}/bin/alembic upgrade head"
+        chdir: "{{ app_dir }}"
+      become_user: "{{ app_user }}"
+      environment:
+        DB_HOST: "{{ db_host }}"
+        DB_PORT: "{{ db_port }}"
+        DB_NAME: "{{ db_name }}"
+        DB_USER: "{{ db_user }}"
+        DB_PASSWORD: "{{ db_password }}"
+      register: alembic_result
+      changed_when: "'Running upgrade' in alembic_result.stdout"
+
+    - name: Show migration output
+      ansible.builtin.debug:
+        var: alembic_result.stdout_lines
+
+    # ── Fix ownership ─────────────────────────────────────────────────────────
+
     - name: Set correct ownership on application directory
       ansible.builtin.file:
         path: "{{ app_dir }}"
@@ -114,6 +188,8 @@
         owner: "{{ app_user }}"
         group: "{{ app_user }}"
         recurse: true
+
+    # ── Systemd service ───────────────────────────────────────────────────────
 
     - name: Create systemd service unit for the application
       ansible.builtin.copy:
@@ -131,8 +207,8 @@
           User={{ app_user }}
           Group={{ app_user }}
           WorkingDirectory={{ app_dir }}
+          EnvironmentFile={{ app_dir }}/.env
           Environment="PATH={{ venv_dir }}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-          Environment="APP_ENV=production"
           ExecStart={{ venv_dir }}/bin/gunicorn app.main:app -k uvicorn.workers.UvicornWorker -w 4 -b 0.0.0.0:8000
           Restart=always
           RestartSec=5
@@ -147,11 +223,11 @@
       ansible.builtin.systemd:
         daemon_reload: true
 
-    - name: Enable and start application service
+    - name: Enable and restart application service
       ansible.builtin.systemd:
         name: "{{ service_name }}"
         enabled: true
-        state: started
+        state: restarted
 
     - name: Wait for application to be healthy on port 8000
       ansible.builtin.wait_for:
@@ -160,6 +236,8 @@
         delay: 5
         timeout: 60
         state: started
+
+    # ── Nginx ─────────────────────────────────────────────────────────────────
 
     - name: Configure nginx reverse proxy
       ansible.builtin.copy:
@@ -171,6 +249,8 @@
           server {
               listen 80;
               server_name _;
+
+              client_max_body_size 10M;
 
               location / {
                   proxy_pass http://127.0.0.1:8000;
@@ -205,6 +285,8 @@
         name: nginx
         enabled: true
         state: restarted
+
+    # ── Final health check ────────────────────────────────────────────────────
 
     - name: Verify application responds via nginx on port 80
       ansible.builtin.uri:

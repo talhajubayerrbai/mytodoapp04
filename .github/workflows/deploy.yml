@@ -30,14 +30,18 @@ jobs:
         run: |
           pip install flake8 || true
           flake8 app/ --max-line-length=120 || true
-
         continue-on-error: true
+
   provision:
     name: Provision
     runs-on: ubuntu-latest
     needs: [test]
     outputs:
       instance_public_ip: ${{ steps.tf_output.outputs.instance_public_ip }}
+      rds_endpoint: ${{ steps.tf_output.outputs.rds_endpoint }}
+      rds_port: ${{ steps.tf_output.outputs.rds_port }}
+      rds_db_name: ${{ steps.tf_output.outputs.rds_db_name }}
+      rds_username: ${{ steps.tf_output.outputs.rds_username }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -68,14 +72,18 @@ jobs:
           terraform apply -auto-approve \
             -var="public_key=${{ secrets.SSH_PUBLIC_KEY }}" \
             -var="private_key=${{ secrets.SSH_PRIVATE_KEY }}" \
-            -var="project_name=${{ secrets.PROJECT_NAME }}"
+            -var="project_name=${{ secrets.PROJECT_NAME }}" \
+            -var="db_password=${{ secrets.DB_PASSWORD }}"
 
       - name: Capture Terraform outputs
         id: tf_output
         working-directory: terraform
         run: |
-          INSTANCE_IP=$(terraform output -raw instance_public_ip)
-          echo "instance_public_ip=${INSTANCE_IP}" >> "$GITHUB_OUTPUT"
+          echo "instance_public_ip=$(terraform output -raw instance_public_ip)" >> "$GITHUB_OUTPUT"
+          echo "rds_endpoint=$(terraform output -raw rds_endpoint)"             >> "$GITHUB_OUTPUT"
+          echo "rds_port=$(terraform output -raw rds_port)"                     >> "$GITHUB_OUTPUT"
+          echo "rds_db_name=$(terraform output -raw rds_db_name)"               >> "$GITHUB_OUTPUT"
+          echo "rds_username=$(terraform output -raw rds_username)"             >> "$GITHUB_OUTPUT"
 
   configure:
     name: Configure
@@ -141,7 +149,12 @@ jobs:
         run: |
           ansible-playbook \
             -i ansible/inventory.ini \
-            ansible/playbook.yml
+            ansible/playbook.yml \
+            --extra-vars "db_host=${{ needs.provision.outputs.rds_endpoint }} \
+                          db_port=${{ needs.provision.outputs.rds_port }} \
+                          db_name=${{ needs.provision.outputs.rds_db_name }} \
+                          db_user=${{ needs.provision.outputs.rds_username }} \
+                          db_password=${{ secrets.DB_PASSWORD }}"
 
   verify:
     name: Verify
@@ -192,7 +205,7 @@ jobs:
           fi
 
       - name: Smoke test - root endpoint
-        run: |-
+        run: |
           APP_URL="${{ steps.get_url.outputs.app_url }}"
           echo "Testing endpoint: ${APP_URL}/"
           STATUS=$(curl -Lsf -o /dev/null -w "%{http_code}" "${APP_URL}/" || true)
@@ -201,5 +214,18 @@ jobs:
             echo "Root endpoint check passed with status ${STATUS}"
           else
             echo "Root endpoint FAILED with status ${STATUS}"
+            exit 1
+          fi
+
+      - name: Smoke test - todos API
+        run: |
+          APP_URL="${{ steps.get_url.outputs.app_url }}"
+          echo "Testing endpoint: ${APP_URL}/api/todos/"
+          STATUS=$(curl -Lsf -o /dev/null -w "%{http_code}" "${APP_URL}/api/todos/" || true)
+          echo "HTTP status: ${STATUS}"
+          if [[ "$STATUS" =~ ^[23] ]]; then
+            echo "Todos API check passed with status ${STATUS}"
+          else
+            echo "Todos API FAILED with status ${STATUS}"
             exit 1
           fi
