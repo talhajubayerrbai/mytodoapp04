@@ -164,7 +164,10 @@ resource "aws_route_table_association" "public" {
 # ── Security groups ───────────────────────────────────────────────────────────
 
 resource "aws_security_group" "app" {
-  name        = "${var.project_name}-app-sg"
+  # name_prefix lets AWS append a unique suffix, so create_before_destroy
+  # can create the replacement SG before deleting the old one without hitting
+  # the InvalidGroup.Duplicate error that a fixed `name` causes.
+  name_prefix = "${var.project_name}-app-sg-"
   description = "Security group for ${var.project_name} app server"
   vpc_id      = aws_vpc.main.id
 
@@ -203,16 +206,17 @@ resource "aws_security_group" "app" {
 
   depends_on = [aws_vpc.main]
 
-  # create_before_destroy ensures a replacement SG is fully created and
-  # attached to the EC2 instance BEFORE the old SG is removed, preventing
-  # the ENI-held DependencyViolation that caused the 15-minute hang.
   lifecycle {
     create_before_destroy = true
+    # Ignore the generated suffix Terraform sees after the first apply,
+    # preventing a perpetual diff on the name field.
+    ignore_changes = [name]
   }
 }
 
 resource "aws_security_group" "rds" {
-  name        = "${var.project_name}-rds-sg"
+  # Same name_prefix pattern for consistency and safe replacement.
+  name_prefix = "${var.project_name}-rds-sg-"
   description = "Allow PostgreSQL access from app server only"
   vpc_id      = aws_vpc.main.id
 
@@ -229,6 +233,7 @@ resource "aws_security_group" "rds" {
 
   lifecycle {
     create_before_destroy = true
+    ignore_changes        = [name]
   }
 }
 
