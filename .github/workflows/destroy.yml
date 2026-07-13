@@ -37,4 +37,5 @@ jobs:
           terraform destroy -auto-approve \
             -var="public_key=${{ secrets.SSH_PUBLIC_KEY }}" \
             -var="private_key=${{ secrets.SSH_PRIVATE_KEY }}" \
-            -var="project_name=${{ secrets.PROJECT_NAME }}"
+            -var="project_name=${{ secrets.PROJECT_NAME }}" \
+            -var="db_password=${{ secrets.DB_PASSWORD }}"

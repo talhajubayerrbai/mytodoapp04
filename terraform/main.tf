@@ -282,7 +282,7 @@ resource "aws_db_instance" "main" {
 
   publicly_accessible       = false
   multi_az                  = false
-  deletion_protection       = true
+  deletion_protection       = false
   skip_final_snapshot       = false
   final_snapshot_identifier = "${var.project_name}-db-final-snapshot"
 
