@@ -17,7 +17,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # Create the priority enum type first, guarded so re-runs don't fail
+    # Create the priority enum type first
     priority_enum = sa.Enum("low", "medium", "high", name="priority_enum")
     priority_enum.create(op.get_bind(), checkfirst=True)
 
@@ -29,9 +29,6 @@ def upgrade() -> None:
         sa.Column("completed", sa.Boolean(), nullable=False, server_default=sa.text("false")),
         sa.Column(
             "priority",
-            # create_type=False: we already created the enum above with checkfirst=True;
-            # without this flag SQLAlchemy emits a second CREATE TYPE inside create_table
-            # with no existence check, causing DuplicateObject on re-deployments.
             sa.Enum("low", "medium", "high", name="priority_enum", create_type=False),
             nullable=False,
             server_default="medium",
