@@ -8,6 +8,10 @@ terraform {
       source  = "hashicorp/local"
       version = "~> 2.0"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.0"
+    }
   }
 
   backend "s3" {}
@@ -24,7 +28,7 @@ variable "public_key" {}
 variable "private_key" {}
 
 variable "db_password" {
-  description = "Master password for the RDS PostgreSQL instance"
+  description = "Seed value for the RDS master password (used to rotate the generated password; the raw value is NOT sent to RDS)"
   sensitive   = true
 }
 
@@ -47,7 +51,23 @@ provider "aws" {
   }
 }
 
-# ── Data ─────────────────────────────────────────────────────────────────────
+# ── Safe RDS password ─────────────────────────────────────────────────────────
+# RDS forbids '/', '@', '"', and ' ' in the master password.
+# We generate a guaranteed-compliant password using random_password.
+# The user-supplied db_password is used only as a keeper so the generated
+# password rotates automatically whenever the secret value changes.
+resource "random_password" "db" {
+  length  = 32
+  special = true
+  # Only include special chars that RDS accepts (excludes / @ " and space)
+  override_special = "!#$%&*()-_=+[]{}|;:,.<>?"
+
+  keepers = {
+    seed = var.db_password
+  }
+}
+
+# ── Data ──────────────────────────────────────────────────────────────────────
 
 data "aws_ami" "ubuntu" {
   most_recent = true
@@ -68,7 +88,7 @@ data "aws_availability_zones" "available" {
   state = "available"
 }
 
-# ── VPC ──────────────────────────────────────────────────────────────────────
+# ── VPC ───────────────────────────────────────────────────────────────────────
 
 resource "aws_vpc" "main" {
   cidr_block           = "10.0.0.0/16"
@@ -91,7 +111,7 @@ resource "aws_subnet" "public" {
   depends_on = [aws_vpc.main]
 }
 
-# ── Private subnets (RDS — two AZs required for subnet group) ────────────────
+# ── Private subnets (RDS — two AZs required for subnet group) ─────────────────
 
 resource "aws_subnet" "private_a" {
   vpc_id            = aws_vpc.main.id
@@ -182,6 +202,13 @@ resource "aws_security_group" "app" {
   tags = { Name = "${var.project_name}-app-sg" }
 
   depends_on = [aws_vpc.main]
+
+  # create_before_destroy ensures a replacement SG is fully created and
+  # attached to the EC2 instance BEFORE the old SG is removed, preventing
+  # the ENI-held DependencyViolation that caused the 15-minute hang.
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "aws_security_group" "rds" {
@@ -199,6 +226,10 @@ resource "aws_security_group" "rds" {
   tags = { Name = "${var.project_name}-rds-sg" }
 
   depends_on = [aws_vpc.main]
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 # Separate rule so that the cross-SG reference can be removed before either SG
@@ -237,7 +268,9 @@ resource "aws_db_instance" "main" {
 
   db_name  = var.db_name
   username = var.db_user
-  password = var.db_password
+  # Use the generated, RDS-compliant password — never the raw secret which
+  # may contain forbidden characters (/, @, ", space).
+  password = random_password.db.result
 
   db_subnet_group_name   = aws_db_subnet_group.main.name
   vpc_security_group_ids = [aws_security_group.rds.id]
@@ -324,4 +357,9 @@ output "rds_db_name" {
 
 output "rds_username" {
   value = aws_db_instance.main.username
+}
+
+output "rds_password" {
+  value     = random_password.db.result
+  sensitive = true
 }
