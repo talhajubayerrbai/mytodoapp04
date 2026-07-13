@@ -100,6 +100,35 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: |
+          terraform init -reconfigure \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ secrets.AWS_REGION }}" \
+            -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate"
+
+      - name: Read DB connection details from Terraform state
+        id: db_config
+        working-directory: terraform
+        run: |
+          # Read all DB connection details directly from Terraform state.
+          # This avoids the GitHub Actions cross-job output masking issue that
+          # silently drops rds_endpoint when its value resembles a secret, and
+          # ensures we use the generated RDS-compliant password (random_password)
+          # rather than the raw secrets.DB_PASSWORD which may contain forbidden
+          # characters such as '@' that break the DATABASE_URL.
+          echo "rds_endpoint=$(terraform output -raw rds_endpoint)"   >> "$GITHUB_OUTPUT"
+          echo "rds_port=$(terraform output -raw rds_port)"           >> "$GITHUB_OUTPUT"
+          echo "rds_db_name=$(terraform output -raw rds_db_name)"     >> "$GITHUB_OUTPUT"
+          echo "rds_username=$(terraform output -raw rds_username)"   >> "$GITHUB_OUTPUT"
+          echo "rds_password=$(terraform output -raw rds_password)"   >> "$GITHUB_OUTPUT"
+
       - name: Set up Python (for Ansible)
         uses: actions/setup-python@v5
         with:
@@ -146,15 +175,16 @@ jobs:
       - name: Run Ansible playbook
         env:
           ANSIBLE_HOST_KEY_CHECKING: "False"
+          RDS_PASSWORD: ${{ steps.db_config.outputs.rds_password }}
         run: |
           ansible-playbook \
             -i ansible/inventory.ini \
             ansible/playbook.yml \
-            --extra-vars "db_host=${{ needs.provision.outputs.rds_endpoint }} \
-                          db_port=${{ needs.provision.outputs.rds_port }} \
-                          db_name=${{ needs.provision.outputs.rds_db_name }} \
-                          db_user=${{ needs.provision.outputs.rds_username }} \
-                          db_password=${{ secrets.DB_PASSWORD }}"
+            --extra-vars "db_host=${{ steps.db_config.outputs.rds_endpoint }} \
+                          db_port=${{ steps.db_config.outputs.rds_port }} \
+                          db_name=${{ steps.db_config.outputs.rds_db_name }} \
+                          db_user=${{ steps.db_config.outputs.rds_username }} \
+                          db_password=${RDS_PASSWORD}"
 
   verify:
     name: Verify
