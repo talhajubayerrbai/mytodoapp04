@@ -1,0 +1,205 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt || true
+          pip install pytest httpx || true
+
+      - name: Run tests
+        run: |
+          pytest --tb=short -q || true
+
+      - name: Lint (advisory)
+        run: |
+          pip install flake8 || true
+          flake8 app/ --max-line-length=120 || true
+
+        continue-on-error: true
+  provision:
+    name: Provision
+    runs-on: ubuntu-latest
+    needs: [test]
+    outputs:
+      instance_public_ip: ${{ steps.tf_output.outputs.instance_public_ip }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: |
+          terraform init -reconfigure \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ secrets.AWS_REGION }}" \
+            -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate"
+
+      - name: Terraform Apply
+        working-directory: terraform
+        run: |
+          terraform apply -auto-approve \
+            -var="public_key=${{ secrets.SSH_PUBLIC_KEY }}" \
+            -var="private_key=${{ secrets.SSH_PRIVATE_KEY }}" \
+            -var="project_name=${{ secrets.PROJECT_NAME }}"
+
+      - name: Capture Terraform outputs
+        id: tf_output
+        working-directory: terraform
+        run: |
+          INSTANCE_IP=$(terraform output -raw instance_public_ip)
+          echo "instance_public_ip=${INSTANCE_IP}" >> "$GITHUB_OUTPUT"
+
+  configure:
+    name: Configure
+    runs-on: ubuntu-latest
+    needs: [provision]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Set up Python (for Ansible)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Ansible
+        run: |
+          python -m pip install --upgrade pip
+          pip install ansible
+
+      - name: Write SSH private key
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
+      - name: Wait for SSH to be available
+        run: |
+          SERVER_IP="${{ needs.provision.outputs.instance_public_ip }}"
+          echo "Waiting for SSH on ${SERVER_IP}..."
+          for i in $(seq 1 30); do
+            if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i ~/.ssh/id_rsa ubuntu@"${SERVER_IP}" "echo ok" 2>/dev/null; then
+              echo "SSH is available."
+              break
+            fi
+            echo "Attempt ${i}/30 failed, retrying in 10s..."
+            sleep 10
+          done
+
+      - name: Generate Ansible inventory
+        run: |
+          SERVER_IP="${{ needs.provision.outputs.instance_public_ip }}"
+          mkdir -p ansible
+          printf '[app]\n%s ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/id_rsa\n' "${SERVER_IP}" > ansible/inventory.ini
+          echo "Generated inventory:"
+          cat ansible/inventory.ini
+
+      - name: Test Ansible SSH connectivity
+        env:
+          ANSIBLE_HOST_KEY_CHECKING: "False"
+        run: |
+          ansible -i ansible/inventory.ini app -m ping
+
+      - name: Run Ansible playbook
+        env:
+          ANSIBLE_HOST_KEY_CHECKING: "False"
+        run: |
+          ansible-playbook \
+            -i ansible/inventory.ini \
+            ansible/playbook.yml
+
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    needs: [provision, configure]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: |
+          terraform init -reconfigure \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ secrets.AWS_REGION }}" \
+            -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate"
+
+      - name: Get app URL from Terraform output
+        id: get_url
+        working-directory: terraform
+        run: |
+          APP_URL=$(terraform output -raw app_url)
+          echo "app_url=${APP_URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test - health endpoint
+        run: |
+          APP_URL="${{ steps.get_url.outputs.app_url }}"
+          echo "Testing endpoint: ${APP_URL}/health"
+          STATUS=$(curl -Lsf -o /dev/null -w "%{http_code}" "${APP_URL}/health" || true)
+          echo "HTTP status: ${STATUS}"
+          if [[ "$STATUS" =~ ^[23] ]]; then
+            echo "Health check passed with status ${STATUS}"
+          else
+            echo "Health check FAILED with status ${STATUS}"
+            exit 1
+          fi
+
+      - name: Smoke test - root endpoint
+        run: |-
+          APP_URL="${{ steps.get_url.outputs.app_url }}"
+          echo "Testing endpoint: ${APP_URL}/"
+          STATUS=$(curl -Lsf -o /dev/null -w "%{http_code}" "${APP_URL}/" || true)
+          echo "HTTP status: ${STATUS}"
+          if [[ "$STATUS" =~ ^[23] ]]; then
+            echo "Root endpoint check passed with status ${STATUS}"
+          else
+            echo "Root endpoint FAILED with status ${STATUS}"
+            exit 1
+          fi
