@@ -189,14 +189,6 @@ resource "aws_security_group" "rds" {
   description = "Allow PostgreSQL access from app server only"
   vpc_id      = aws_vpc.main.id
 
-  ingress {
-    description     = "PostgreSQL from app"
-    from_port       = 5432
-    to_port         = 5432
-    protocol        = "tcp"
-    security_groups = [aws_security_group.app.id]
-  }
-
   egress {
     from_port   = 0
     to_port     = 0
@@ -206,7 +198,19 @@ resource "aws_security_group" "rds" {
 
   tags = { Name = "${var.project_name}-rds-sg" }
 
-  depends_on = [aws_security_group.app]
+  depends_on = [aws_vpc.main]
+}
+
+# Separate rule so that the cross-SG reference can be removed before either SG
+# is destroyed, preventing the DependencyViolation on teardown.
+resource "aws_security_group_rule" "rds_from_app" {
+  type                     = "ingress"
+  description              = "PostgreSQL from app"
+  from_port                = 5432
+  to_port                  = 5432
+  protocol                 = "tcp"
+  security_group_id        = aws_security_group.rds.id
+  source_security_group_id = aws_security_group.app.id
 }
 
 # ── RDS subnet group ──────────────────────────────────────────────────────────
@@ -238,10 +242,10 @@ resource "aws_db_instance" "main" {
   db_subnet_group_name   = aws_db_subnet_group.main.name
   vpc_security_group_ids = [aws_security_group.rds.id]
 
-  publicly_accessible    = false
-  multi_az               = false
-  deletion_protection    = true
-  skip_final_snapshot    = false
+  publicly_accessible       = false
+  multi_az                  = false
+  deletion_protection       = true
+  skip_final_snapshot       = false
   final_snapshot_identifier = "${var.project_name}-db-final-snapshot"
 
   backup_retention_period = 7
