@@ -9,6 +9,7 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy import inspect
 
 revision: str = "0001"
 down_revision: Union[str, None] = None
@@ -17,44 +18,53 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # Create the priority enum type first
-    priority_enum = sa.Enum("low", "medium", "high", name="priority_enum")
-    priority_enum.create(op.get_bind(), checkfirst=True)
+    bind = op.get_bind()
 
-    op.create_table(
-        "todos",
-        sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False),
-        sa.Column("title", sa.String(length=255), nullable=False),
-        sa.Column("description", sa.Text(), nullable=True),
-        sa.Column("completed", sa.Boolean(), nullable=False, server_default=sa.text("false")),
-        sa.Column(
-            "priority",
-            sa.Enum("low", "medium", "high", name="priority_enum", create_type=False),
-            nullable=False,
-            server_default="medium",
-        ),
-        sa.Column("due_date", sa.DateTime(timezone=True), nullable=True),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.PrimaryKeyConstraint("id"),
-    )
+    # Create the priority enum type — IF NOT EXISTS (idempotent)
+    bind.execute(sa.text(
+        "DO $$ BEGIN "
+        "  CREATE TYPE priority_enum AS ENUM ('low', 'medium', 'high'); "
+        "EXCEPTION WHEN duplicate_object THEN null; "
+        "END $$;"
+    ))
 
-    op.create_index(op.f("ix_todos_id"), "todos", ["id"], unique=False)
-    op.create_index(op.f("ix_todos_title"), "todos", ["title"], unique=False)
-    op.create_index(op.f("ix_todos_completed"), "todos", ["completed"], unique=False)
-    op.create_index(op.f("ix_todos_priority"), "todos", ["priority"], unique=False)
+    # Only create the table if it doesn't already exist
+    inspector = inspect(bind)
+    if "todos" not in inspector.get_table_names():
+        op.create_table(
+            "todos",
+            sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False),
+            sa.Column("title", sa.String(length=255), nullable=False),
+            sa.Column("description", sa.Text(), nullable=True),
+            sa.Column("completed", sa.Boolean(), nullable=False, server_default=sa.text("false")),
+            sa.Column(
+                "priority",
+                sa.Enum("low", "medium", "high", name="priority_enum", create_type=False),
+                nullable=False,
+                server_default="medium",
+            ),
+            sa.Column("due_date", sa.DateTime(timezone=True), nullable=True),
+            sa.Column(
+                "created_at",
+                sa.DateTime(timezone=True),
+                server_default=sa.text("now()"),
+                nullable=False,
+            ),
+            sa.Column(
+                "updated_at",
+                sa.DateTime(timezone=True),
+                server_default=sa.text("now()"),
+                nullable=False,
+            ),
+            sa.PrimaryKeyConstraint("id"),
+        )
 
-    # Auto-update updated_at via a trigger
+        op.create_index(op.f("ix_todos_id"), "todos", ["id"], unique=False)
+        op.create_index(op.f("ix_todos_title"), "todos", ["title"], unique=False)
+        op.create_index(op.f("ix_todos_completed"), "todos", ["completed"], unique=False)
+        op.create_index(op.f("ix_todos_priority"), "todos", ["priority"], unique=False)
+
+    # Auto-update updated_at via a trigger — both statements are idempotent
     op.execute("""
         CREATE OR REPLACE FUNCTION update_updated_at_column()
         RETURNS TRIGGER AS $$
@@ -66,10 +76,16 @@ def upgrade() -> None:
     """)
 
     op.execute("""
-        CREATE TRIGGER todos_updated_at
-        BEFORE UPDATE ON todos
-        FOR EACH ROW
-        EXECUTE FUNCTION update_updated_at_column();
+        DO $$ BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_trigger WHERE tgname = 'todos_updated_at'
+            ) THEN
+                CREATE TRIGGER todos_updated_at
+                BEFORE UPDATE ON todos
+                FOR EACH ROW
+                EXECUTE FUNCTION update_updated_at_column();
+            END IF;
+        END $$;
     """)
 
 
