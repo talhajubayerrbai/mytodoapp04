@@ -280,11 +280,13 @@ resource "aws_db_instance" "main" {
   db_subnet_group_name   = aws_db_subnet_group.main.name
   vpc_security_group_ids = [aws_security_group.rds.id]
 
-  publicly_accessible       = false
-  multi_az                  = false
-  deletion_protection       = false
-  skip_final_snapshot       = false
-  final_snapshot_identifier = "${var.project_name}-db-final-snapshot"
+  publicly_accessible = false
+  multi_az            = false
+  deletion_protection = false
+  # skip_final_snapshot = true avoids the "snapshot already exists" error on
+  # repeated destroy runs and removes the requirement to take a snapshot before
+  # deletion (this is a dev environment; backups rely on backup_retention_period).
+  skip_final_snapshot = true
 
   backup_retention_period = 7
   backup_window           = "03:00-04:00"
