@@ -9,7 +9,6 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
-from sqlalchemy import inspect
 
 revision: str = "0001"
 down_revision: Union[str, None] = None
@@ -20,7 +19,9 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     bind = op.get_bind()
 
-    # Create the priority enum type — IF NOT EXISTS (idempotent)
+    # ── 1. Create the enum type — fully idempotent ────────────────────────────
+    # Use DO $$ … EXCEPTION to silently swallow duplicate_object errors so that
+    # re-runs (e.g. after a failed first attempt) never raise DuplicateObject.
     bind.execute(sa.text(
         "DO $$ BEGIN "
         "  CREATE TYPE priority_enum AS ENUM ('low', 'medium', 'high'); "
@@ -28,57 +29,58 @@ def upgrade() -> None:
         "END $$;"
     ))
 
-    # Only create the table if it doesn't already exist
-    inspector = inspect(bind)
-    if "todos" not in inspector.get_table_names():
-        op.create_table(
-            "todos",
-            sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False),
-            sa.Column("title", sa.String(length=255), nullable=False),
-            sa.Column("description", sa.Text(), nullable=True),
-            sa.Column("completed", sa.Boolean(), nullable=False, server_default=sa.text("false")),
-            sa.Column(
-                "priority",
-                sa.Enum("low", "medium", "high", name="priority_enum", create_type=False),
-                nullable=False,
-                server_default="medium",
-            ),
-            sa.Column("due_date", sa.DateTime(timezone=True), nullable=True),
-            sa.Column(
-                "created_at",
-                sa.DateTime(timezone=True),
-                server_default=sa.text("now()"),
-                nullable=False,
-            ),
-            sa.Column(
-                "updated_at",
-                sa.DateTime(timezone=True),
-                server_default=sa.text("now()"),
-                nullable=False,
-            ),
-            sa.PrimaryKeyConstraint("id"),
-        )
+    # ── 2. Create the table — fully idempotent via raw SQL ───────────────────
+    # We deliberately avoid op.create_table() with sa.Enum here because some
+    # SQLAlchemy / psycopg2 version combinations emit a bare CREATE TYPE even
+    # when create_type=False is set on a string-based Enum column, causing a
+    # DuplicateObject error on re-runs.  Using CREATE TABLE IF NOT EXISTS with
+    # a raw cast is 100 % reliable regardless of driver version.
+    bind.execute(sa.text("""
+        CREATE TABLE IF NOT EXISTS todos (
+            id          BIGSERIAL PRIMARY KEY,
+            title       VARCHAR(255)               NOT NULL,
+            description TEXT,
+            completed   BOOLEAN                    NOT NULL DEFAULT FALSE,
+            priority    priority_enum              NOT NULL DEFAULT 'medium',
+            due_date    TIMESTAMPTZ,
+            created_at  TIMESTAMPTZ                NOT NULL DEFAULT NOW(),
+            updated_at  TIMESTAMPTZ                NOT NULL DEFAULT NOW()
+        );
+    """))
 
-        op.create_index(op.f("ix_todos_id"), "todos", ["id"], unique=False)
-        op.create_index(op.f("ix_todos_title"), "todos", ["title"], unique=False)
-        op.create_index(op.f("ix_todos_completed"), "todos", ["completed"], unique=False)
-        op.create_index(op.f("ix_todos_priority"), "todos", ["priority"], unique=False)
+    # ── 3. Indexes — each guarded so re-runs are safe ────────────────────────
+    bind.execute(sa.text(
+        "CREATE INDEX IF NOT EXISTS ix_todos_id        ON todos (id);"
+    ))
+    bind.execute(sa.text(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_todos_id_unique ON todos (id);"
+    ))
+    bind.execute(sa.text(
+        "CREATE INDEX IF NOT EXISTS ix_todos_title     ON todos (title);"
+    ))
+    bind.execute(sa.text(
+        "CREATE INDEX IF NOT EXISTS ix_todos_completed ON todos (completed);"
+    ))
+    bind.execute(sa.text(
+        "CREATE INDEX IF NOT EXISTS ix_todos_priority  ON todos (priority);"
+    ))
 
-    # Auto-update updated_at via a trigger — both statements are idempotent
-    op.execute("""
+    # ── 4. Auto-update updated_at trigger — both statements are idempotent ───
+    bind.execute(sa.text("""
         CREATE OR REPLACE FUNCTION update_updated_at_column()
         RETURNS TRIGGER AS $$
         BEGIN
-            NEW.updated_at = now();
+            NEW.updated_at = NOW();
             RETURN NEW;
         END;
-        $$ language 'plpgsql';
-    """)
+        $$ LANGUAGE 'plpgsql';
+    """))
 
-    op.execute("""
+    bind.execute(sa.text("""
         DO $$ BEGIN
             IF NOT EXISTS (
-                SELECT 1 FROM pg_trigger WHERE tgname = 'todos_updated_at'
+                SELECT 1 FROM pg_trigger
+                WHERE tgname = 'todos_updated_at'
             ) THEN
                 CREATE TRIGGER todos_updated_at
                 BEFORE UPDATE ON todos
@@ -86,15 +88,17 @@ def upgrade() -> None:
                 EXECUTE FUNCTION update_updated_at_column();
             END IF;
         END $$;
-    """)
+    """))
 
 
 def downgrade() -> None:
-    op.execute("DROP TRIGGER IF EXISTS todos_updated_at ON todos")
-    op.execute("DROP FUNCTION IF EXISTS update_updated_at_column")
-    op.drop_index(op.f("ix_todos_priority"), table_name="todos")
-    op.drop_index(op.f("ix_todos_completed"), table_name="todos")
-    op.drop_index(op.f("ix_todos_title"), table_name="todos")
-    op.drop_index(op.f("ix_todos_id"), table_name="todos")
-    op.drop_table("todos")
-    sa.Enum(name="priority_enum").drop(op.get_bind(), checkfirst=True)
+    bind = op.get_bind()
+    bind.execute(sa.text("DROP TRIGGER IF EXISTS todos_updated_at ON todos"))
+    bind.execute(sa.text("DROP FUNCTION IF EXISTS update_updated_at_column()"))
+    bind.execute(sa.text("DROP INDEX IF EXISTS ix_todos_priority"))
+    bind.execute(sa.text("DROP INDEX IF EXISTS ix_todos_completed"))
+    bind.execute(sa.text("DROP INDEX IF EXISTS ix_todos_title"))
+    bind.execute(sa.text("DROP INDEX IF EXISTS ix_todos_id_unique"))
+    bind.execute(sa.text("DROP INDEX IF EXISTS ix_todos_id"))
+    bind.execute(sa.text("DROP TABLE IF EXISTS todos"))
+    bind.execute(sa.text("DROP TYPE IF EXISTS priority_enum"))
