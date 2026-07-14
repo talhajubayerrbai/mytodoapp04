@@ -259,3 +259,163 @@ jobs:
             echo "Todos API FAILED with status ${STATUS}"
             exit 1
           fi
+
+  # ── Playwright E2E ─────────────────────────────────────────────────────────
+  e2e:
+    name: E2E (Playwright)
+    runs-on: ubuntu-latest
+    needs: [provision, verify]
+    # Always run so we get artifacts even when tests fail
+    if: always() && needs.verify.result != 'cancelled'
+    env:
+      PLAYWRIGHT_REPORT_PREFIX: playwright-reports/${{ github.run_id }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Get app URL ──────────────────────────────────────────────────────────
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: |
+          terraform init -reconfigure \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ secrets.AWS_REGION }}" \
+            -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate"
+
+      - name: Get app URL from Terraform output
+        id: get_url
+        working-directory: terraform
+        run: |
+          APP_URL=$(terraform output -raw app_url)
+          echo "app_url=${APP_URL}" >> "$GITHUB_OUTPUT"
+          echo "App URL: ${APP_URL}"
+
+      # ── Node + Playwright setup ──────────────────────────────────────────────
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: e2e/package-lock.json
+
+      - name: Install Node dependencies
+        working-directory: e2e
+        run: npm ci --prefer-offline || npm install
+
+      - name: Install Playwright browsers
+        working-directory: e2e
+        run: npx playwright install --with-deps chromium firefox
+
+      # ── Run E2E tests ────────────────────────────────────────────────────────
+      - name: Run Playwright tests
+        working-directory: e2e
+        env:
+          APP_URL: ${{ steps.get_url.outputs.app_url }}
+          CI: "true"
+        run: |
+          echo "Running Playwright E2E against: ${APP_URL}"
+          npx playwright test \
+            --reporter=list,html,json \
+            || true   # always continue so we can upload artifacts
+
+      # ── Upload raw artifacts to S3 ──────────────────────────────────────────
+      - name: Upload test-results (screenshots/videos/traces) to S3
+        if: always()
+        working-directory: e2e
+        run: |
+          if [ -d "test-results" ] && [ "$(ls -A test-results)" ]; then
+            echo "Uploading test-results to S3..."
+            aws s3 sync test-results/ \
+              "s3://${{ secrets.TF_STATE_BUCKET }}/${PLAYWRIGHT_REPORT_PREFIX}/artifacts/" \
+              --region "${{ secrets.AWS_REGION }}" \
+              --only-show-errors
+            echo "Artifacts uploaded."
+          else
+            echo "No test-results directory or it is empty, skipping artifact upload."
+          fi
+
+      # ── Upload HTML report to S3 ─────────────────────────────────────────────
+      - name: Upload Playwright HTML report to S3
+        if: always()
+        working-directory: e2e
+        run: |
+          if [ -d "playwright-report" ]; then
+            echo "Uploading HTML report to S3..."
+            aws s3 sync playwright-report/ \
+              "s3://${{ secrets.TF_STATE_BUCKET }}/${PLAYWRIGHT_REPORT_PREFIX}/report/" \
+              --region "${{ secrets.AWS_REGION }}" \
+              --only-show-errors \
+              --content-type "text/html" \
+              --exclude "*" --include "*.html"
+            # Upload all other assets (JS, CSS, JSON, media)
+            aws s3 sync playwright-report/ \
+              "s3://${{ secrets.TF_STATE_BUCKET }}/${PLAYWRIGHT_REPORT_PREFIX}/report/" \
+              --region "${{ secrets.AWS_REGION }}" \
+              --only-show-errors \
+              --exclude "*.html"
+            echo "Report uploaded."
+          else
+            echo "No playwright-report directory found."
+          fi
+
+      # ── Print report location summary ─────────────────────────────────────────
+      - name: Print report location
+        if: always()
+        run: |
+          BUCKET="${{ secrets.TF_STATE_BUCKET }}"
+          REGION="${{ secrets.AWS_REGION }}"
+          PREFIX="${PLAYWRIGHT_REPORT_PREFIX}"
+          REPORT_KEY="${PREFIX}/report/index.html"
+
+          echo "## 🎭 Playwright E2E Report" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Item | Location |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|------|----------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 📊 HTML Report (S3 key) | \`${REPORT_KEY}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 🎬 Artifacts prefix | \`${PREFIX}/artifacts/\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 🪣 S3 Bucket | \`${BUCKET}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 🌍 Region | \`${REGION}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "> To download the report locally:" >> "$GITHUB_STEP_SUMMARY"
+          echo "> \`\`\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "> aws s3 sync s3://${BUCKET}/${PREFIX}/report/ ./playwright-report --region ${REGION}" >> "$GITHUB_STEP_SUMMARY"
+          echo "> npx playwright show-report ./playwright-report" >> "$GITHUB_STEP_SUMMARY"
+          echo "> \`\`\`" >> "$GITHUB_STEP_SUMMARY"
+
+          # Also print to logs
+          echo ""
+          echo "======================================================"
+          echo "  Playwright report uploaded to S3"
+          echo "  Bucket : ${BUCKET}"
+          echo "  Key    : ${REPORT_KEY}"
+          echo "  Artifacts: ${PREFIX}/artifacts/"
+          echo ""
+          echo "  To view locally:"
+          echo "  aws s3 sync s3://${BUCKET}/${PREFIX}/report/ ./playwright-report --region ${REGION}"
+          echo "  npx playwright show-report ./playwright-report"
+          echo "======================================================"
+
+      # ── Upload report as GitHub Actions artifact (backup) ─────────────────────
+      - name: Upload Playwright report as GitHub Actions artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report-${{ github.run_id }}
+          path: |
+            e2e/playwright-report/
+            e2e/test-results/
+          retention-days: 30
+          if-no-files-found: ignore
