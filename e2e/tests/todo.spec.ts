@@ -1,5 +1,5 @@
 /**
- * Playwright E2E test suite for mytodoapp04
+ * Playwright E2E test suite for mytodoapp04-fix
  *
  * Covers every feature exposed by the Todo app:
  *  - Page load & health
