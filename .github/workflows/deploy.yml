@@ -23,6 +23,8 @@ jobs:
           pip install -r requirements.txt
 
       # ── Unit tests with coverage ────────────────────────────────────────────
+      # Threshold is controlled by pyproject.toml (--cov-fail-under=75).
+      # Do NOT add --cov-fail-under here — it would override pyproject.toml.
       - name: Run unit tests with coverage
         env:
           # SQLite in-memory — no real Postgres needed in CI
@@ -75,7 +77,7 @@ jobs:
       # ── Vulnerability scan — Python dependencies (Safety v3) ───────────────
       - name: Dependency vulnerability scan (Safety)
         run: |
-          # Run scan and write to file first, then surface in job summary
+          # Write to file first, then surface in job summary
           safety scan \
             --file requirements.txt \
             --short-report \
@@ -100,7 +102,7 @@ jobs:
       # ── Static security analysis — source code (Bandit) ────────────────────
       - name: Static security scan (Bandit)
         run: |
-          # Write reports to files first, then surface text report in job summary
+          # Text report for humans
           bandit \
             -r app/ \
             -ll \
@@ -223,12 +225,6 @@ jobs:
         id: db_config
         working-directory: terraform
         run: |
-          # Read all DB connection details directly from Terraform state.
-          # This avoids the GitHub Actions cross-job output masking issue that
-          # silently drops rds_endpoint when its value resembles a secret, and
-          # ensures we use the generated RDS-compliant password (random_password)
-          # rather than the raw secrets.DB_PASSWORD which may contain forbidden
-          # characters such as '@' that break the DATABASE_URL.
           echo "rds_endpoint=$(terraform output -raw rds_endpoint)"   >> "$GITHUB_OUTPUT"
           echo "rds_port=$(terraform output -raw rds_port)"           >> "$GITHUB_OUTPUT"
           echo "rds_db_name=$(terraform output -raw rds_db_name)"     >> "$GITHUB_OUTPUT"
@@ -468,7 +464,6 @@ jobs:
               --only-show-errors \
               --content-type "text/html" \
               --exclude "*" --include "*.html"
-            # Upload all other assets (JS, CSS, JSON, media)
             aws s3 sync playwright-report/ \
               "s3://${{ secrets.TF_STATE_BUCKET }}/${PLAYWRIGHT_REPORT_PREFIX}/report/" \
               --region "${{ secrets.AWS_REGION }}" \
@@ -503,7 +498,6 @@ jobs:
           echo "> npx playwright show-report ./playwright-report" >> "$GITHUB_STEP_SUMMARY"
           echo "> \`\`\`" >> "$GITHUB_STEP_SUMMARY"
 
-          # Also print to logs
           echo ""
           echo "======================================================"
           echo "  Playwright report uploaded to S3"

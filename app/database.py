@@ -3,18 +3,26 @@ from sqlalchemy.orm import DeclarativeBase
 
 from app.config import settings
 
+# Read the URL at import time (conftest patches settings before importing this
+# module, so in tests this will be the SQLite URL, not the Postgres URL).
+_url = settings.DATABASE_URL
+
 # SQLite (used in CI/tests via aiosqlite) does not support pool_size,
 # max_overflow or pool_pre_ping — pass those kwargs only for Postgres.
-_url = settings.DATABASE_URL
 _is_sqlite = _url.startswith("sqlite")
 
-_engine_kwargs = {"echo": settings.APP_ENV == "development"}
+_engine_kwargs: dict = {"echo": settings.APP_ENV == "development"}
 if not _is_sqlite:
     _engine_kwargs.update(
         pool_size=5,
         max_overflow=10,
         pool_pre_ping=True,
     )
+else:
+    # StaticPool keeps the same in-memory DB across connections (for tests).
+    from sqlalchemy.pool import StaticPool
+    _engine_kwargs["connect_args"] = {"check_same_thread": False}
+    _engine_kwargs["poolclass"] = StaticPool
 
 engine = create_async_engine(_url, **_engine_kwargs)
 
