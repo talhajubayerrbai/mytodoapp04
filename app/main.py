@@ -21,7 +21,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="mytodoapp04",
+    title="mytodoapp04-qa",
     version="1.0.0",
     description="Production-grade Todo API backed by RDS PostgreSQL",
     lifespan=lifespan,
@@ -50,4 +50,4 @@ def root():
     html = pathlib.Path(__file__).parent.parent / "public" / "index.html"
     if html.exists():
         return HTMLResponse(content=html.read_text())
-    return HTMLResponse(content="<h1>mytodoapp04 is running</h1>")
+    return HTMLResponse(content="<h1>mytodoapp04-qa is running</h1>")
