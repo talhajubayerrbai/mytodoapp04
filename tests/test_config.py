@@ -36,34 +36,38 @@ class TestSettingsDefaults:
 class TestDatabaseURL:
     def _make(self, host="myhost", port=5432, name="mydb",
               user="myuser", password="mypass"):
+        # Pass DATABASE_URL=None explicitly so pydantic-settings does NOT pick up
+        # the DATABASE_URL=sqlite+aiosqlite:///:memory: set by conftest.py,
+        # allowing us to test the computed postgresql+asyncpg:// URL.
         return Settings(
             DB_HOST=host, DB_PORT=port, DB_NAME=name,
             DB_USER=user, DB_PASSWORD=password,
+            DATABASE_URL=None,
         )
 
     def test_uses_asyncpg_driver(self):
         s = self._make()
-        assert s.DATABASE_URL.startswith("postgresql+asyncpg://")
+        assert s.database_url.startswith("postgresql+asyncpg://")
 
     def test_contains_host(self):
         s = self._make(host="rds.example.com")
-        assert "rds.example.com" in s.DATABASE_URL
+        assert "rds.example.com" in s.database_url
 
     def test_contains_port(self):
         s = self._make(port=5433)
-        assert ":5433/" in s.DATABASE_URL
+        assert ":5433/" in s.database_url
 
     def test_contains_dbname(self):
         s = self._make(name="tododb")
-        assert "/tododb" in s.DATABASE_URL
+        assert "/tododb" in s.database_url
 
     def test_contains_user(self):
         s = self._make(user="todoapp")
-        assert "todoapp:" in s.DATABASE_URL
+        assert "todoapp:" in s.database_url
 
     def test_url_format(self):
         s = self._make(host="h", port=5432, name="db", user="u", password="p")
-        assert s.DATABASE_URL == "postgresql+asyncpg://u:p@h:5432/db"
+        assert s.database_url == "postgresql+asyncpg://u:p@h:5432/db"
 
 
 # ─── DATABASE_URL_SYNC property ───────────────────────────────────────────────
@@ -71,9 +75,11 @@ class TestDatabaseURL:
 class TestDatabaseURLSync:
     def _make(self, host="h", port=5432, name="db",
               user="u", password="p"):
+        # Pass DATABASE_URL=None explicitly to bypass the env var set by conftest.
         return Settings(
             DB_HOST=host, DB_PORT=port, DB_NAME=name,
             DB_USER=user, DB_PASSWORD=password,
+            DATABASE_URL=None,
         )
 
     def test_uses_psycopg2_driver(self):
@@ -86,7 +92,7 @@ class TestDatabaseURLSync:
 
     def test_async_and_sync_differ_only_in_driver(self):
         s = self._make()
-        async_url = s.DATABASE_URL.replace("postgresql+asyncpg", "")
+        async_url = s.database_url.replace("postgresql+asyncpg", "")
         sync_url = s.DATABASE_URL_SYNC.replace("postgresql+psycopg2", "")
         assert async_url == sync_url
 
