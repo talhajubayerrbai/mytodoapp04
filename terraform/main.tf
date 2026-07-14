@@ -90,7 +90,7 @@ data "aws_availability_zones" "available" {
 
 # ── VPC ───────────────────────────────────────────────────────────────────────
 
-resource "aws_vpc" "fix" {
+resource "aws_vpc" "main" {
   cidr_block           = "10.0.0.0/16"
   enable_dns_hostnames = true
   enable_dns_support   = true
@@ -135,7 +135,7 @@ resource "aws_subnet" "private_b" {
 
 # ── Internet gateway & routing ────────────────────────────────────────────────
 
-resource "aws_internet_gateway" "fix" {
+resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
 
   tags = { Name = "${var.project_name}-igw" }
@@ -251,7 +251,7 @@ resource "aws_security_group_rule" "rds_from_app" {
 
 # ── RDS subnet group ──────────────────────────────────────────────────────────
 
-resource "aws_db_subnet_group" "fix" {
+resource "aws_db_subnet_group" "main" {
   name       = "${var.project_name}-db-subnet-group"
   subnet_ids = [aws_subnet.private_a.id, aws_subnet.private_b.id]
 
@@ -262,7 +262,7 @@ resource "aws_db_subnet_group" "fix" {
 
 # ── RDS PostgreSQL ────────────────────────────────────────────────────────────
 
-resource "aws_db_instance" "fix" {
+resource "aws_db_instance" "main" {
   identifier        = "${var.project_name}-db"
   engine            = "postgres"
   engine_version    = "15"
