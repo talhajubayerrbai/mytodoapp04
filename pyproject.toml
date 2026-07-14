@@ -1,0 +1,36 @@
+# ─── Pytest ───────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+asyncio_mode                    = "auto"
+asyncio_default_fixture_loop_scope = "session"
+testpaths                       = ["tests"]
+addopts = [
+    "--tb=short",
+    "-q",
+    "--cov=app",
+    "--cov-report=term-missing",
+    "--cov-report=html:htmlcov",
+    "--cov-report=xml:coverage.xml",
+    "--cov-fail-under=80",
+]
+
+# ─── Coverage ─────────────────────────────────────────────────────────────────
+[tool.coverage.run]
+source   = ["app"]
+omit     = ["*/migrations/*", "alembic/*", "tests/*"]
+
+[tool.coverage.report]
+skip_empty        = true
+show_missing      = true
+exclude_lines     = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]
+
+# ─── Bandit (static security analysis) ───────────────────────────────────────
+[tool.bandit]
+targets      = ["app"]
+exclude_dirs = ["tests", "alembic", "e2e"]
+skips        = ["B101"]   # assert — fine in tests
+severity     = "medium"
+confidence   = "medium"

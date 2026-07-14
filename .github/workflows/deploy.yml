@@ -4,6 +4,7 @@ on:
   workflow_dispatch:
 
 jobs:
+  # ── Unit tests + Coverage + Security scanning ─────────────────────────────
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -19,18 +20,122 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt || true
-          pip install pytest httpx || true
+          pip install -r requirements.txt
 
-      - name: Run tests
+      # ── Unit tests with coverage ────────────────────────────────────────────
+      - name: Run unit tests with coverage
+        env:
+          # SQLite in-memory — no real Postgres needed in CI
+          APP_ENV: test
+          DB_HOST: localhost
+          DB_PORT: "5432"
+          DB_NAME: testdb
+          DB_USER: testuser
+          DB_PASSWORD: testpass
         run: |
-          pytest --tb=short -q || true
+          pytest \
+            --tb=short \
+            -q \
+            --cov=app \
+            --cov-report=term-missing \
+            --cov-report=html:htmlcov \
+            --cov-report=xml:coverage.xml \
+            --cov-fail-under=80
 
+      # ── Coverage summary in job summary ────────────────────────────────────
+      - name: Coverage summary
+        if: always()
+        run: |
+          echo "## 📊 Unit Test Coverage" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          python -m coverage report --skip-empty 2>/dev/null >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      # ── Upload HTML coverage report as artifact ─────────────────────────────
+      - name: Upload coverage HTML report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report-${{ github.run_id }}
+          path: htmlcov/
+          retention-days: 30
+          if-no-files-found: ignore
+
+      # ── Upload coverage XML (for badge services / external tools) ───────────
+      - name: Upload coverage XML
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-xml-${{ github.run_id }}
+          path: coverage.xml
+          retention-days: 30
+          if-no-files-found: ignore
+
+      # ── Lint (advisory only) ────────────────────────────────────────────────
       - name: Lint (advisory)
         run: |
           pip install flake8 || true
           flake8 app/ --max-line-length=120 || true
         continue-on-error: true
+
+      # ── Vulnerability scan — Python dependencies (Safety v3) ───────────────
+      - name: Dependency vulnerability scan (Safety)
+        run: |
+          echo "## 🔒 Dependency Vulnerability Scan (Safety)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          safety scan \
+            --file requirements.txt \
+            --short-report \
+            2>&1 | tee safety-report.txt >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+        continue-on-error: true
+
+      - name: Upload Safety report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: safety-report-${{ github.run_id }}
+          path: safety-report.txt
+          retention-days: 30
+          if-no-files-found: ignore
+
+      # ── Static security analysis — source code (Bandit) ────────────────────
+      - name: Static security scan (Bandit)
+        run: |
+          echo "## 🛡️ Static Security Scan (Bandit)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          bandit \
+            -r app/ \
+            -ll \
+            -ii \
+            --format text \
+            --exclude tests,alembic,e2e \
+            2>&1 | tee bandit-report.txt >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          # JSON report for tooling / dashboards
+          bandit \
+            -r app/ \
+            -ll \
+            -ii \
+            --format json \
+            -o bandit-report.json \
+            --exclude tests,alembic,e2e \
+            || true
+        continue-on-error: true
+
+      - name: Upload Bandit reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bandit-report-${{ github.run_id }}
+          path: |
+            bandit-report.txt
+            bandit-report.json
+          retention-days: 30
+          if-no-files-found: ignore
 
   provision:
     name: Provision
