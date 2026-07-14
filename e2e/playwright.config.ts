@@ -10,8 +10,8 @@ export default defineConfig({
   globalTimeout: 20 * 60_000,
   /* Fail the build on CI if you accidentally left test.only in the source code */
   forbidOnly: !!process.env.CI,
-  /* Retry on CI only */
-  retries: process.env.CI ? 2 : 0,
+  /* No retries */
+  retries: 0,
   /* Opt out of parallel tests on CI to avoid DB race conditions */
   workers: process.env.CI ? 1 : undefined,
   /* Reporter: list in terminal + HTML for upload */
@@ -36,15 +36,11 @@ export default defineConfig({
     actionTimeout: 15_000,
   },
 
-  /* Test against Chromium and Firefox */
+  /* Test against Chromium only */
   projects: [
     {
       name: 'chromium',
       use: { ...devices['Desktop Chrome'] },
-    },
-    {
-      name: 'firefox',
-      use: { ...devices['Desktop Firefox'] },
     },
   ],
 

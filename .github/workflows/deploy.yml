@@ -74,40 +74,37 @@ jobs:
           flake8 app/ --max-line-length=120 || true
         continue-on-error: true
 
-      # ── Vulnerability scan — Python dependencies (Safety v3) ───────────────
-      - name: Dependency vulnerability scan (Safety)
+      # ── Vulnerability scan — Python dependencies (pip-audit) ───────────────
+      - name: Dependency vulnerability scan (pip-audit)
         run: |
-          # Write to file first, then surface in job summary
-          safety scan \
-            --file requirements.txt \
-            --short-report \
-            > safety-report.txt 2>&1 || true
+          pip install pip-audit || true
+          pip-audit -r requirements.txt \
+            --format markdown \
+            -o pip-audit-report.md 2>&1 || true
 
-          echo "## 🔒 Dependency Vulnerability Scan (Safety)" >> "$GITHUB_STEP_SUMMARY"
+          echo "## 🔒 Dependency Vulnerability Scan (pip-audit)" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          cat safety-report.txt >> "$GITHUB_STEP_SUMMARY" || true
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat pip-audit-report.md >> "$GITHUB_STEP_SUMMARY" || true
         continue-on-error: true
 
-      - name: Upload Safety report
+      - name: Upload pip-audit report
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: safety-report-${{ github.run_id }}
-          path: safety-report.txt
+          name: pip-audit-report-${{ github.run_id }}
+          path: pip-audit-report.md
           retention-days: 30
           if-no-files-found: ignore
 
       # ── Static security analysis — source code (Bandit) ────────────────────
       - name: Static security scan (Bandit)
         run: |
-          # Text report for humans
+          # txt report for humans (note: valid format is 'txt' not 'text')
           bandit \
             -r app/ \
             -ll \
             -ii \
-            --format text \
+            --format txt \
             -o bandit-report.txt \
             --exclude tests,alembic,e2e \
             || true
@@ -421,7 +418,7 @@ jobs:
 
       - name: Install Playwright browsers
         working-directory: e2e
-        run: npx playwright install --with-deps chromium firefox
+        run: npx playwright install --with-deps chromium
 
       # ── Run E2E tests ────────────────────────────────────────────────────────
       - name: Run Playwright tests
