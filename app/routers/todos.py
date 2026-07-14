@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Literal
 import math
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -32,8 +32,8 @@ async def list_todos(
     completed: Optional[bool] = Query(None, description="Filter by completion status"),
     priority: Optional[Priority] = Query(None, description="Filter by priority"),
     search: Optional[str] = Query(None, description="Full-text search on title"),
-    sort_by: str = Query("created_at", enum=["created_at", "updated_at", "due_date", "priority", "title"]),
-    order: str = Query("desc", enum=["asc", "desc"]),
+    sort_by: Literal["created_at", "updated_at", "due_date", "priority", "title"] = Query("created_at"),
+    order: Literal["asc", "desc"] = Query("desc"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
