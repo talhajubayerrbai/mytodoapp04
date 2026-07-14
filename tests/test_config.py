@@ -10,7 +10,9 @@ from app.config import Settings
 
 class TestSettingsDefaults:
     def test_default_app_env(self):
+        # Pass APP_ENV explicitly so the env var set by conftest ("test") doesn't bleed in
         s = Settings(
+            APP_ENV="production",
             DB_HOST="h", DB_PORT=5432, DB_NAME="n",
             DB_USER="u", DB_PASSWORD="p",
         )

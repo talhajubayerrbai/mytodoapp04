@@ -65,6 +65,28 @@ async def list_todos(
     )
 
 
+# ─── Bulk routes MUST come before /{todo_id} to avoid the catch-all matching
+#     "bulk" as a todo_id integer (which would return 422 or 404).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─── Bulk delete ─────────────────────────────────────────────────────────────
+
+@router.delete("/bulk/delete", status_code=status.HTTP_204_NO_CONTENT, summary="Bulk delete todos")
+async def bulk_delete(payload: BulkDeleteRequest, db: AsyncSession = Depends(get_db)):
+    await db.execute(delete(Todo).where(Todo.id.in_(payload.ids)))
+
+
+# ─── Bulk complete ────────────────────────────────────────────────────────────
+
+@router.patch("/bulk/complete", response_model=list[TodoResponse], summary="Bulk mark todos complete/incomplete")
+async def bulk_complete(payload: BulkCompleteRequest, db: AsyncSession = Depends(get_db)):
+    await db.execute(
+        update(Todo).where(Todo.id.in_(payload.ids)).values(completed=payload.completed)
+    )
+    result = await db.execute(select(Todo).where(Todo.id.in_(payload.ids)))
+    return result.scalars().all()
+
+
 # ─── Create ──────────────────────────────────────────────────────────────────
 
 @router.post("/", response_model=TodoResponse, status_code=status.HTTP_201_CREATED, summary="Create a todo")
@@ -122,21 +144,3 @@ async def delete_todo(todo_id: int, db: AsyncSession = Depends(get_db)):
     if not todo:
         raise HTTPException(status_code=404, detail="Todo not found")
     await db.delete(todo)
-
-
-# ─── Bulk delete ─────────────────────────────────────────────────────────────
-
-@router.delete("/bulk/delete", status_code=status.HTTP_204_NO_CONTENT, summary="Bulk delete todos")
-async def bulk_delete(payload: BulkDeleteRequest, db: AsyncSession = Depends(get_db)):
-    await db.execute(delete(Todo).where(Todo.id.in_(payload.ids)))
-
-
-# ─── Bulk complete ────────────────────────────────────────────────────────────
-
-@router.patch("/bulk/complete", response_model=list[TodoResponse], summary="Bulk mark todos complete/incomplete")
-async def bulk_complete(payload: BulkCompleteRequest, db: AsyncSession = Depends(get_db)):
-    await db.execute(
-        update(Todo).where(Todo.id.in_(payload.ids)).values(completed=payload.completed)
-    )
-    result = await db.execute(select(Todo).where(Todo.id.in_(payload.ids)))
-    return result.scalars().all()

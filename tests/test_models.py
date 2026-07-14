@@ -42,19 +42,14 @@ class TestTodoModel:
         assert Todo.__tablename__ == "todos"
 
     def test_repr_contains_id_and_title(self):
-        todo = Todo.__new__(Todo)
-        todo.id = 7
-        todo.title = "Write tests"
-        todo.completed = False
+        # Use the normal constructor so SQLAlchemy instrumentation is initialised
+        todo = Todo(id=7, title="Write tests", completed=False)
         assert "7" in repr(todo)
         assert "Write tests" in repr(todo)
         assert "False" in repr(todo)
 
     def test_repr_format(self):
-        todo = Todo.__new__(Todo)
-        todo.id = 1
-        todo.title = "Hello"
-        todo.completed = True
+        todo = Todo(id=1, title="Hello", completed=True)
         r = repr(todo)
         assert r.startswith("<Todo")
         assert "id=1" in r

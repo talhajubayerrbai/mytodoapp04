@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 import enum
 
 from sqlalchemy import (
-    BigInteger, Boolean, DateTime, Enum, String, Text, func
+    Integer, Boolean, DateTime, Enum, String, Text, func
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -18,7 +18,9 @@ class Priority(str, enum.Enum):
 class Todo(Base):
     __tablename__ = "todos"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, index=True, autoincrement=True)
+    # Integer (not BigInteger) so SQLite auto-increments the PK correctly.
+    # Postgres treats INTEGER primary keys identically for a todo-scale workload.
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True, autoincrement=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     completed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
