@@ -2,7 +2,7 @@
   "name": "mytodoapp04-e2e",
   "version": "1.0.0",
   "private": true,
-  "description": "Playwright E2E tests for mytodoapp04",
+  "description": "Playwright E2E tests for mytodoapp04-uat",
   "scripts": {
     "test": "playwright test",
     "test:headed": "playwright test --headed",

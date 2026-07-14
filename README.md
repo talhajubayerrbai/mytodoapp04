@@ -1,4 +1,4 @@
-# mytodoapp04
+# mytodoapp04-uat
 
 FastAPI application — bootstrapped by UDAP.
 
@@ -40,5 +40,5 @@ uvicorn app.main:app --reload      # visit http://localhost:8000
 
 ## Deployment
 
-Push to `main` — GitHub Actions will provision infrastructure and deploy automatically.
+Push to `uat` — GitHub Actions will provision infrastructure and deploy automatically.
 Check `.github/workflows/deploy.yml` for the pipeline definition.
