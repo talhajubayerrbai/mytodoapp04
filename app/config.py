@@ -6,7 +6,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     # App
     APP_ENV: str = "production"
-    HOST: str = "0.0.0.0"
+    HOST: str = "0.0.0.0"  # nosec B104 — intentional: server must bind all interfaces
     PORT: int = 8000
 
     # Database individual fields (used when DATABASE_URL is not set directly)

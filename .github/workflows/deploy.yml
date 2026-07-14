@@ -78,9 +78,8 @@ jobs:
       - name: Dependency vulnerability scan (pip-audit)
         run: |
           pip install pip-audit || true
-          pip-audit -r requirements.txt \
-            --format markdown \
-            -o pip-audit-report.md 2>&1 || true
+          # pip-audit outputs markdown to stdout — redirect to file
+          pip-audit -r requirements.txt --format markdown > pip-audit-report.md 2>&1 || true
 
           echo "## 🔒 Dependency Vulnerability Scan (pip-audit)" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
