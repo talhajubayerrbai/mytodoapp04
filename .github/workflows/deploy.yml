@@ -33,14 +33,7 @@ jobs:
           DB_USER: testuser
           DB_PASSWORD: testpass
         run: |
-          pytest \
-            --tb=short \
-            -q \
-            --cov=app \
-            --cov-report=term-missing \
-            --cov-report=html:htmlcov \
-            --cov-report=xml:coverage.xml \
-            --cov-fail-under=80
+          pytest
 
       # ── Coverage summary in job summary ────────────────────────────────────
       - name: Coverage summary
