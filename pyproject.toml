@@ -34,3 +34,5 @@ exclude_dirs = ["tests", "alembic", "e2e"]
 skips        = ["B101"]   # assert — fine in tests
 severity     = "medium"
 confidence   = "medium"
+output_format = "json"
+output_file   = "bandit-report.json"
