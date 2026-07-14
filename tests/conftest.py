@@ -5,76 +5,110 @@ Uses an in-memory SQLite database (via aiosqlite) so no real PostgreSQL
 instance is required during CI.
 
 Key design decisions:
-- DATABASE_URL env vars are patched in `pytest_configure` (before any app
-  module is imported) so SQLAlchemy never tries to connect to Postgres.
-- `patch_db_sessions` is a session-scoped autouse fixture that replaces
-  `AsyncSessionLocal` inside `app.routers.health` and `app.routers.api`
+- os.environ overrides happen BEFORE any app module is imported so that
+  app/config.py Settings() resolves DB_* to safe test values, and
+  app/database.py builds a SQLite engine (not Postgres).
+- app/database.py already guards against SQLite-incompatible pool kwargs.
+- `patch_db_sessions` replaces AsyncSessionLocal inside health.py and api.py
   (those routers call it directly, bypassing the `get_db` dependency).
-- Individual tests use the `client` fixture which also overrides the `get_db`
-  FastAPI dependency with the per-test isolated session.
+- `client` overrides the FastAPI `get_db` dependency with a per-test session.
 """
 import os
-import pytest
-import pytest_asyncio
-from unittest.mock import patch, AsyncMock
-from contextlib import asynccontextmanager
-
-from httpx import AsyncClient, ASGITransport
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 
 # ── Patch env BEFORE any app module is imported ───────────────────────────────
-# app/config.py reads DB_* at import time; point it at SQLite so
-# create_async_engine() in app/database.py does not try to reach Postgres.
+# Must come before any `from app.*` so Settings() and create_async_engine()
+# both see these values at module-load time.
+os.environ["APP_ENV"] = "test"
+os.environ["DB_HOST"] = "localhost"
+os.environ["DB_PORT"] = "5432"
+os.environ["DB_NAME"] = "testdb"
+os.environ["DB_USER"] = "testuser"
+os.environ["DB_PASSWORD"] = "testpass"
 
-os.environ.setdefault("DB_HOST", "localhost")
-os.environ.setdefault("DB_PORT", "5432")
-os.environ.setdefault("DB_NAME", "testdb")
-os.environ.setdefault("DB_USER", "testuser")
-os.environ.setdefault("DB_PASSWORD", "testpass")
-os.environ.setdefault("APP_ENV", "test")
+# Override the computed DATABASE_URL so app/database.py uses SQLite directly.
+# pydantic-settings reads individual DB_* fields and builds the URL via a
+# @property, but we can force the engine URL by monkey-patching the settings
+# object AFTER import — see patch block below.
 
-# Now it's safe to import app modules
-from app.main import app          # noqa: E402
-from app.database import Base, get_db  # noqa: E402
+import pytest                                                        # noqa: E402
+import pytest_asyncio                                                # noqa: E402
+from unittest.mock import patch                                      # noqa: E402
+from contextlib import asynccontextmanager                           # noqa: E402
 
-# ── In-memory SQLite engine (session-scoped) ──────────────────────────────────
+from httpx import AsyncClient, ASGITransport                        # noqa: E402
+from sqlalchemy.ext.asyncio import (                                 # noqa: E402
+    create_async_engine, async_sessionmaker, AsyncSession,
+)
 
+# ── SQLite engine (session-scoped, shared across the whole test run) ──────────
 SQLITE_URL = "sqlite+aiosqlite:///:memory:"
 
+# Build the test engine immediately so we can inject it before app imports.
+_test_engine = create_async_engine(
+    SQLITE_URL,
+    connect_args={"check_same_thread": False},
+    echo=False,
+)
+_test_session_factory = async_sessionmaker(
+    bind=_test_engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+    autocommit=False,
+    autoflush=False,
+)
+
+# ── Patch app.config.settings and app.database BEFORE importing app.main ──────
+# This ensures create_async_engine inside app/database.py uses SQLite.
+with patch("app.config.settings") as _mock_settings:
+    _mock_settings.APP_ENV = "test"
+    _mock_settings.DATABASE_URL = SQLITE_URL
+    _mock_settings.HOST = "0.0.0.0"
+    _mock_settings.PORT = 8000
+
+    # Now safe to import — database.py will read settings.DATABASE_URL == SQLite
+    import app.database as _app_db                                   # noqa: E402
+
+# Replace the module-level engine and session factory with our test versions
+_app_db.engine = _test_engine
+_app_db.AsyncSessionLocal = _test_session_factory
+
+# Now import main (it imports from app.database which we've already patched)
+from app.main import app                                             # noqa: E402
+from app.database import Base, get_db                               # noqa: E402
+
+
+# ── Create tables once per session ───────────────────────────────────────────
+
+@pytest_asyncio.fixture(scope="session", autouse=True)
+async def create_tables():
+    async with _test_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield
+    async with _test_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+
+
+# ── Expose engine and session_factory as fixtures ────────────────────────────
 
 @pytest_asyncio.fixture(scope="session")
 async def engine():
-    _engine = create_async_engine(
-        SQLITE_URL,
-        connect_args={"check_same_thread": False},
-        echo=False,
-    )
-    async with _engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield _engine
-    await _engine.dispose()
+    yield _test_engine
 
 
 @pytest_asyncio.fixture(scope="session")
-def session_factory(engine):
-    return async_sessionmaker(
-        bind=engine,
-        class_=AsyncSession,
-        expire_on_commit=False,
-        autocommit=False,
-        autoflush=False,
-    )
+def session_factory():
+    return _test_session_factory
 
 
 # ── Per-test DB session with rollback isolation ───────────────────────────────
 
 @pytest_asyncio.fixture()
-async def db_session(engine, session_factory):
+async def db_session():
     """
-    Yields an AsyncSession backed by SQLite that is rolled back after every
-    test so tests don't pollute each other.
+    Yields an AsyncSession backed by SQLite, rolled back after every test
+    to prevent test pollution.
     """
-    async with engine.connect() as conn:
+    async with _test_engine.connect() as conn:
         await conn.begin()
         session = AsyncSession(bind=conn, expire_on_commit=False)
         try:
@@ -87,40 +121,32 @@ async def db_session(engine, session_factory):
 # ── Patch AsyncSessionLocal used directly by health & api routers ─────────────
 
 @pytest_asyncio.fixture(autouse=True)
-async def patch_db_sessions(engine):
+async def patch_db_sessions():
     """
-    health.py and api.py call `AsyncSessionLocal()` directly rather than going
-    through the FastAPI `get_db` dependency.  We replace it with a factory that
-    returns a real SQLite session so those endpoints work in CI without Postgres.
+    health.py and api.py call AsyncSessionLocal() directly — bypassing get_db.
+    Replace it in both routers AND in app.database with our SQLite factory.
     """
-    _session_factory = async_sessionmaker(
-        bind=engine,
-        class_=AsyncSession,
-        expire_on_commit=False,
-        autocommit=False,
-        autoflush=False,
-    )
-
     @asynccontextmanager
-    async def _fake_session_ctx():
-        async with _session_factory() as session:
+    async def _sqlite_ctx():
+        async with _test_session_factory() as session:
             yield session
 
-    # AsyncSessionLocal is used as an async context manager in both routers
     class _FakeSessionLocal:
+        """Mimics async_sessionmaker: callable returning an async context manager."""
         def __call__(self):
-            return _fake_session_ctx()
+            return _sqlite_ctx()
 
         def __aenter__(self):
-            return _fake_session_ctx().__aenter__()
+            return _sqlite_ctx().__aenter__()
 
         def __aexit__(self, *args):
-            return _fake_session_ctx().__aexit__(*args)
+            return _sqlite_ctx().__aexit__(*args)
 
     fake = _FakeSessionLocal()
 
     with patch("app.routers.health.AsyncSessionLocal", fake), \
-         patch("app.routers.api.AsyncSessionLocal", fake):
+         patch("app.routers.api.AsyncSessionLocal", fake), \
+         patch("app.database.AsyncSessionLocal", fake):
         yield
 
 
@@ -129,8 +155,8 @@ async def patch_db_sessions(engine):
 @pytest_asyncio.fixture()
 async def client(db_session):
     """
-    Returns an httpx AsyncClient that talks to the FastAPI app and overrides
-    the `get_db` dependency with the per-test isolated SQLite session.
+    Returns an httpx AsyncClient pointing at the FastAPI app.
+    Overrides the `get_db` dependency with the per-test isolated SQLite session.
     """
     async def _override_get_db():
         yield db_session

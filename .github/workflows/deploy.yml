@@ -82,13 +82,16 @@ jobs:
       # ── Vulnerability scan — Python dependencies (Safety v3) ───────────────
       - name: Dependency vulnerability scan (Safety)
         run: |
-          echo "## 🔒 Dependency Vulnerability Scan (Safety)" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          # Run scan and write to file first, then surface in job summary
           safety scan \
             --file requirements.txt \
             --short-report \
-            2>&1 | tee safety-report.txt >> "$GITHUB_STEP_SUMMARY" || true
+            > safety-report.txt 2>&1 || true
+
+          echo "## 🔒 Dependency Vulnerability Scan (Safety)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat safety-report.txt >> "$GITHUB_STEP_SUMMARY" || true
           echo '```' >> "$GITHUB_STEP_SUMMARY"
         continue-on-error: true
 
@@ -104,17 +107,16 @@ jobs:
       # ── Static security analysis — source code (Bandit) ────────────────────
       - name: Static security scan (Bandit)
         run: |
-          echo "## 🛡️ Static Security Scan (Bandit)" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          # Write reports to files first, then surface text report in job summary
           bandit \
             -r app/ \
             -ll \
             -ii \
             --format text \
+            -o bandit-report.txt \
             --exclude tests,alembic,e2e \
-            2>&1 | tee bandit-report.txt >> "$GITHUB_STEP_SUMMARY" || true
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+            || true
+
           # JSON report for tooling / dashboards
           bandit \
             -r app/ \
@@ -124,6 +126,12 @@ jobs:
             -o bandit-report.json \
             --exclude tests,alembic,e2e \
             || true
+
+          echo "## 🛡️ Static Security Scan (Bandit)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat bandit-report.txt >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
         continue-on-error: true
 
       - name: Upload Bandit reports
@@ -369,9 +377,13 @@ jobs:
   e2e:
     name: E2E (Playwright)
     runs-on: ubuntu-latest
-    needs: [provision, verify]
-    # Always run so we get artifacts even when tests fail
-    if: always() && needs.verify.result != 'cancelled'
+    needs: [test, provision, configure, verify]
+    # Only run when ALL upstream jobs succeeded — no e2e on partial failures
+    if: >
+      needs.test.result == 'success' &&
+      needs.provision.result == 'success' &&
+      needs.configure.result == 'success' &&
+      needs.verify.result == 'success'
     env:
       PLAYWRIGHT_REPORT_PREFIX: playwright-reports/${{ github.run_id }}
 
