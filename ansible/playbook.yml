@@ -1,301 +1,348 @@
 ---
-- name: Configure Python FastAPI application server
-  hosts: app
+- name: Configure app server
+  hosts: all
   become: true
   vars:
-    app_dir: /opt/myapp
+    app_dir: /opt/app
+    venv_dir: /opt/app/.venv
     app_user: ubuntu
-    venv_dir: /opt/myapp/.venv
-    service_name: myapp
-    # DB vars are passed in via --extra-vars from the CI workflow
-    db_host: "{{ db_host }}"
-    db_port: "{{ db_port | default(5432) }}"
-    db_name: "{{ db_name | default('tododb') }}"
-    db_user: "{{ db_user | default('todoapp') }}"
-    db_password: "{{ db_password }}"
+    app_port: 8000
+    # These are passed as --extra-vars from the CI configure job:
+    # db_host, db_name, db_user, db_password, project_name
 
   tasks:
-    # ── System dependencies ────────────────────────────────────────────────────
+    #  System packages 
 
-    - name: Update apt cache and install system dependencies
-      ansible.builtin.apt:
+    - name: Update apt cache
+      apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install system packages
+      apt:
         name:
-          - python3
+          - python3.12
+          - python3.12-venv
+          - python3.12-dev
           - python3-pip
-          - python3-venv
-          - python3-dev
-          - build-essential
-          - acl
           - nginx
           - git
           - curl
+          - build-essential
           - libpq-dev
-          - postgresql-client
+          - pkg-config
         state: present
-        update_cache: true
 
-    # ── Application directory ─────────────────────────────────────────────────
+    #  App directory 
 
-    - name: Create application directory
-      ansible.builtin.file:
+    - name: Create app directory
+      file:
         path: "{{ app_dir }}"
         state: directory
         owner: "{{ app_user }}"
         group: "{{ app_user }}"
         mode: "0755"
 
-    # ── Sync application source ───────────────────────────────────────────────
+    #  Sync application code 
 
-    - name: Synchronize application source to server
-      ansible.builtin.copy:
-        src: "{{ item.src }}"
-        dest: "{{ item.dest }}"
+    - name: Sync app source - main entrypoint
+      copy:
+        src: ../main.py
+        dest: "{{ app_dir }}/main.py"
         owner: "{{ app_user }}"
         group: "{{ app_user }}"
         mode: "0644"
-      loop:
-        - { src: "../app/", dest: "{{ app_dir }}/app/" }
-        - { src: "../main.py", dest: "{{ app_dir }}/main.py" }
 
-    - name: Synchronize Alembic configuration
-      ansible.builtin.copy:
-        src: "{{ item.src }}"
-        dest: "{{ item.dest }}"
-        owner: "{{ app_user }}"
-        group: "{{ app_user }}"
-        mode: "0644"
-      loop:
-        - { src: "../alembic.ini", dest: "{{ app_dir }}/alembic.ini" }
-        - { src: "../alembic/", dest: "{{ app_dir }}/alembic/" }
+    - name: Sync app package
+      synchronize:
+        src: ../app/
+        dest: "{{ app_dir }}/app/"
+        delete: true
+        rsync_opts:
+          - "--exclude=__pycache__"
+          - "--exclude=*.pyc"
 
-    - name: Check if requirements.txt exists
-      ansible.builtin.stat:
-        path: "../requirements.txt"
-      register: req_file
-      delegate_to: localhost
-
-    - name: Copy requirements.txt if present
-      ansible.builtin.copy:
-        src: "../requirements.txt"
-        dest: "{{ app_dir }}/requirements.txt"
-        owner: "{{ app_user }}"
-        group: "{{ app_user }}"
-        mode: "0644"
-      when: req_file.stat.exists
-
-    - name: Write minimal requirements.txt if not present
-      ansible.builtin.shell: |
-        cat > {{ app_dir }}/requirements.txt <<'EOF'
-        fastapi>=0.110.0
-        uvicorn[standard]>=0.29.0
-        gunicorn>=21.2.0
-        python-dotenv>=1.0.0
-        sqlalchemy[asyncio]>=2.0.0
-        asyncpg>=0.29.0
-        psycopg2-binary>=2.9.9
-        alembic>=1.13.0
-        python-multipart>=0.0.9
-        pydantic>=2.6.0
-        pydantic-settings>=2.2.0
-        aiofiles>=23.2.1
-        EOF
-      args:
-        creates: "{{ app_dir }}/requirements.txt"
-      when: not req_file.stat.exists
-
-    - name: Check if public/ directory exists locally
-      ansible.builtin.stat:
-        path: "../public"
-      register: public_dir
-      delegate_to: localhost
-
-    - name: Synchronize public/ directory if it exists
-      ansible.builtin.copy:
-        src: "../public/"
-        dest: "{{ app_dir }}/public/"
-        owner: "{{ app_user }}"
-        group: "{{ app_user }}"
-        mode: "0644"
-      when: public_dir.stat.exists and public_dir.stat.isdir
-
-    # ── Environment file ──────────────────────────────────────────────────────
-
-    - name: Write .env file with database credentials
-      ansible.builtin.copy:
-        dest: "{{ app_dir }}/.env"
-        owner: "{{ app_user }}"
-        group: "{{ app_user }}"
-        mode: "0600"
-        content: |
-          APP_ENV=production
-          HOST=0.0.0.0
-          PORT=8000
-          DB_HOST={{ db_host }}
-          DB_PORT={{ db_port }}
-          DB_NAME={{ db_name }}
-          DB_USER={{ db_user }}
-          DB_PASSWORD={{ db_password }}
-
-    # ── Python virtualenv & dependencies ──────────────────────────────────────
-
-    - name: Create Python virtual environment
-      ansible.builtin.command:
-        cmd: python3 -m venv {{ venv_dir }}
-        creates: "{{ venv_dir }}/bin/activate"
-      become_user: "{{ app_user }}"
-
-    - name: Upgrade pip in virtualenv
-      ansible.builtin.pip:
-        name: pip
-        state: latest
-        virtualenv: "{{ venv_dir }}"
-        virtualenv_python: python3
-      become_user: "{{ app_user }}"
-
-    - name: Install Python dependencies
-      ansible.builtin.pip:
-        requirements: "{{ app_dir }}/requirements.txt"
-        virtualenv: "{{ venv_dir }}"
-        virtualenv_python: python3
-      become_user: "{{ app_user }}"
-
-    # ── Alembic migrations ────────────────────────────────────────────────────
-
-    - name: Run Alembic database migrations
-      ansible.builtin.command:
-        cmd: "{{ venv_dir }}/bin/alembic upgrade head"
-        chdir: "{{ app_dir }}"
-      become_user: "{{ app_user }}"
-      environment:
-        DB_HOST: "{{ db_host }}"
-        DB_PORT: "{{ db_port }}"
-        DB_NAME: "{{ db_name }}"
-        DB_USER: "{{ db_user }}"
-        DB_PASSWORD: "{{ db_password }}"
-      register: alembic_result
-      changed_when: "'Running upgrade' in alembic_result.stdout"
-
-    - name: Show migration output
-      ansible.builtin.debug:
-        var: alembic_result.stdout_lines
-
-    # ── Fix ownership ─────────────────────────────────────────────────────────
-
-    - name: Set correct ownership on application directory
-      ansible.builtin.file:
-        path: "{{ app_dir }}"
-        state: directory
+    - name: Fix app package ownership
+      file:
+        path: "{{ app_dir }}/app"
         owner: "{{ app_user }}"
         group: "{{ app_user }}"
         recurse: true
 
-    # ── Systemd service ───────────────────────────────────────────────────────
+    - name: Sync alembic directory
+      synchronize:
+        src: ../alembic/
+        dest: "{{ app_dir }}/alembic/"
+        delete: true
+        rsync_opts:
+          - "--exclude=__pycache__"
+          - "--exclude=*.pyc"
 
-    - name: Create systemd service unit for the application
-      ansible.builtin.copy:
-        dest: /etc/systemd/system/{{ service_name }}.service
-        owner: root
-        group: root
+    - name: Fix alembic ownership
+      file:
+        path: "{{ app_dir }}/alembic"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        recurse: true
+
+    - name: Check if alembic.ini exists
+      stat:
+        path: "{{ playbook_dir }}/../alembic.ini"
+      register: alembic_ini_stat
+      delegate_to: localhost
+
+    - name: Sync alembic.ini (if present)
+      copy:
+        src: ../alembic.ini
+        dest: "{{ app_dir }}/alembic.ini"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
         mode: "0644"
+      when: alembic_ini_stat.stat.exists
+
+    - name: Create default alembic.ini (if not present in repo)
+      shell: |
+        cat > {{ app_dir }}/alembic.ini << 'ALEMBICINI'
+        [alembic]
+        script_location = alembic
+        prepend_sys_path = .
+        version_path_separator = os
+        sqlalchemy.url = driver://user:pass@localhost/dbname
+
+        [loggers]
+        keys = root,sqlalchemy,alembic
+
+        [handlers]
+        keys = console
+
+        [formatters]
+        keys = generic
+
+        [logger_root]
+        level = WARN
+        handlers = console
+        qualname =
+
+        [logger_sqlalchemy]
+        level = WARN
+        handlers =
+        qualname = sqlalchemy.engine
+
+        [logger_alembic]
+        level = INFO
+        handlers =
+        qualname = alembic
+
+        [handler_console]
+        class = StreamHandler
+        args = (sys.stderr,)
+        level = NOTSET
+        formatter = generic
+
+        [formatter_generic]
+        format = %(levelname)-5.5s [%(name)s] %(message)s
+        datefmt = %%H:%%M:%%S
+        ALEMBICINI
+      args:
+        creates: "{{ app_dir }}/alembic.ini"
+      when: not alembic_ini_stat.stat.exists
+
+    - name: Check if requirements.txt exists
+      stat:
+        path: "{{ playbook_dir }}/../requirements.txt"
+      register: req_stat
+      delegate_to: localhost
+
+    - name: Sync requirements.txt (if present)
+      copy:
+        src: ../requirements.txt
+        dest: "{{ app_dir }}/requirements.txt"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0644"
+      when: req_stat.stat.exists
+
+    - name: Check if public/ directory exists
+      stat:
+        path: "{{ playbook_dir }}/../public"
+      register: public_dir_stat
+      delegate_to: localhost
+
+    - name: Sync public/ static assets (if present)
+      synchronize:
+        src: ../public/
+        dest: "{{ app_dir }}/public/"
+        delete: true
+      when: public_dir_stat.stat.exists
+
+    - name: Fix public/ ownership
+      file:
+        path: "{{ app_dir }}/public"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        recurse: true
+      when: public_dir_stat.stat.exists
+
+    #  Python virtual environment 
+
+    - name: Create Python virtual environment
+      command: python3.12 -m venv {{ venv_dir }}
+      args:
+        creates: "{{ venv_dir }}/bin/python"
+      become_user: "{{ app_user }}"
+
+    - name: Upgrade pip in venv
+      command: "{{ venv_dir }}/bin/pip install --upgrade pip"
+      become_user: "{{ app_user }}"
+
+    - name: Install Python dependencies from requirements.txt
+      command: "{{ venv_dir }}/bin/pip install -r {{ app_dir }}/requirements.txt"
+      become_user: "{{ app_user }}"
+      when: req_stat.stat.exists
+
+    - name: Install core Python dependencies (if no requirements.txt)
+      command: >
+        {{ venv_dir }}/bin/pip install
+        fastapi uvicorn[standard] gunicorn
+        sqlalchemy[asyncio] asyncpg psycopg2-binary
+        alembic pydantic pydantic-settings python-dotenv
+      become_user: "{{ app_user }}"
+      when: not req_stat.stat.exists
+
+    #  Environment file 
+
+    - name: Write .env file
+      shell: |
+        cat > {{ app_dir }}/.env << 'ENVEOF'
+        APP_ENV=production
+        HOST=0.0.0.0
+        PORT={{ app_port }}
+        DB_HOST={{ db_host }}
+        DB_PORT=5432
+        DB_NAME={{ db_name }}
+        DB_USER={{ db_user }}
+        DB_PASSWORD={{ db_password }}
+        ENVEOF
+        chmod 600 {{ app_dir }}/.env
+        chown {{ app_user }}:{{ app_user }} {{ app_dir }}/.env
+
+    #  Alembic migrations 
+
+    - name: Run Alembic migrations
+      command: "{{ venv_dir }}/bin/alembic upgrade head"
+      args:
+        chdir: "{{ app_dir }}"
+      become_user: "{{ app_user }}"
+      environment:
+        DB_HOST: "{{ db_host }}"
+        DB_PORT: "5432"
+        DB_NAME: "{{ db_name }}"
+        DB_USER: "{{ db_user }}"
+        DB_PASSWORD: "{{ db_password }}"
+
+    #  Systemd service 
+
+    - name: Create systemd service for gunicorn
+      copy:
+        dest: /etc/systemd/system/app.service
         content: |
           [Unit]
-          Description=mytodoapp04 FastAPI Application
+          Description=mytodoapp04 FastAPI application
           After=network.target
 
           [Service]
-          Type=exec
+          Type=notify
           User={{ app_user }}
           Group={{ app_user }}
           WorkingDirectory={{ app_dir }}
           EnvironmentFile={{ app_dir }}/.env
-          Environment="PATH={{ venv_dir }}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-          ExecStart={{ venv_dir }}/bin/gunicorn app.main:app -k uvicorn.workers.UvicornWorker -w 4 -b 0.0.0.0:8000
+          ExecStart={{ venv_dir }}/bin/gunicorn app.main:app \
+            -k uvicorn.workers.UvicornWorker \
+            -w 4 \
+            -b 0.0.0.0:{{ app_port }} \
+            --timeout 120 \
+            --access-logfile - \
+            --error-logfile -
+          ExecReload=/bin/kill -s HUP $MAINPID
           Restart=always
           RestartSec=5
-          StandardOutput=journal
-          StandardError=journal
-          SyslogIdentifier={{ service_name }}
+          KillMode=mixed
+          TimeoutStopSec=5
+          PrivateTmp=true
 
           [Install]
           WantedBy=multi-user.target
+        mode: "0644"
 
     - name: Reload systemd daemon
-      ansible.builtin.systemd:
+      systemd:
         daemon_reload: true
 
-    - name: Enable and restart application service
-      ansible.builtin.systemd:
-        name: "{{ service_name }}"
+    - name: Enable and start app service
+      systemd:
+        name: app
         enabled: true
         state: restarted
 
-    - name: Wait for application to be healthy on port 8000
-      ansible.builtin.wait_for:
-        host: 127.0.0.1
-        port: 8000
-        delay: 5
-        timeout: 60
-        state: started
-
-    # ── Nginx ─────────────────────────────────────────────────────────────────
-
-    - name: Configure nginx reverse proxy
-      ansible.builtin.copy:
-        dest: /etc/nginx/sites-available/{{ service_name }}
-        owner: root
-        group: root
-        mode: "0644"
-        content: |
-          server {
-              listen 80;
-              server_name _;
-
-              client_max_body_size 10M;
-
-              location / {
-                  proxy_pass http://127.0.0.1:8000;
-                  proxy_set_header Host $host;
-                  proxy_set_header X-Real-IP $remote_addr;
-                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                  proxy_set_header X-Forwarded-Proto $scheme;
-                  proxy_connect_timeout 60s;
-                  proxy_send_timeout 60s;
-                  proxy_read_timeout 60s;
-              }
-          }
-
-    - name: Enable nginx site
-      ansible.builtin.file:
-        src: /etc/nginx/sites-available/{{ service_name }}
-        dest: /etc/nginx/sites-enabled/{{ service_name }}
-        state: link
+    #  Nginx configuration 
 
     - name: Remove default nginx site
-      ansible.builtin.file:
+      file:
         path: /etc/nginx/sites-enabled/default
         state: absent
 
+    - name: Configure nginx reverse proxy
+      copy:
+        dest: /etc/nginx/sites-available/app
+        content: |
+          server {
+              listen 80 default_server;
+              listen [::]:80 default_server;
+
+              server_name _;
+
+              client_max_body_size 20M;
+
+              location / {
+                  proxy_pass         http://127.0.0.1:{{ app_port }};
+                  proxy_http_version 1.1;
+                  proxy_set_header   Upgrade $http_upgrade;
+                  proxy_set_header   Connection "upgrade";
+                  proxy_set_header   Host $host;
+                  proxy_set_header   X-Real-IP $remote_addr;
+                  proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header   X-Forwarded-Proto $scheme;
+                  proxy_read_timeout 300s;
+                  proxy_connect_timeout 75s;
+              }
+          }
+        mode: "0644"
+
+    - name: Enable nginx app site
+      file:
+        src: /etc/nginx/sites-available/app
+        dest: /etc/nginx/sites-enabled/app
+        state: link
+
     - name: Test nginx configuration
-      ansible.builtin.command:
-        cmd: nginx -t
+      command: nginx -t
       changed_when: false
 
     - name: Enable and restart nginx
-      ansible.builtin.systemd:
+      systemd:
         name: nginx
         enabled: true
         state: restarted
 
-    # ── Final health check ────────────────────────────────────────────────────
+    #  Final health check on the server 
 
-    - name: Verify application responds via nginx on port 80
-      ansible.builtin.uri:
-        url: "http://127.0.0.1:80/health"
+    - name: Wait for app to be healthy
+      uri:
+        url: "http://localhost:{{ app_port }}/health"
         method: GET
-        status_code: [200, 307, 301, 302]
+        status_code: [200, 307]
         follow_redirects: all
-        timeout: 30
-      register: health_response
-      retries: 5
-      delay: 5
-      until: health_response.status in [200, 307, 301, 302]
+      register: health_result
+      retries: 12
+      delay: 10
+      until: health_result.status in [200, 201, 301, 302, 307]
