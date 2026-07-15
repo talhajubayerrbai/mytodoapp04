@@ -52,6 +52,28 @@ jobs:
             echo "Deletion protection is already disabled on $DB_ID — skipping."
           fi
 
+      - name: Delete stale RDS final snapshot
+        run: |
+          SNAPSHOT_ID="${{ secrets.PROJECT_NAME }}-db-final-snapshot"
+
+          # Check whether the snapshot exists
+          STATUS=$(aws rds describe-db-snapshots \
+            --db-snapshot-identifier "$SNAPSHOT_ID" \
+            --query 'DBSnapshots[0].Status' \
+            --output text 2>/dev/null || echo "NOT_FOUND")
+
+          if [ "$STATUS" = "NOT_FOUND" ] || [ "$STATUS" = "None" ] || [ -z "$STATUS" ]; then
+            echo "No existing final snapshot $SNAPSHOT_ID — nothing to delete."
+          else
+            echo "Found existing final snapshot $SNAPSHOT_ID (status: $STATUS). Deleting it so terraform destroy can proceed..."
+            aws rds delete-db-snapshot --db-snapshot-identifier "$SNAPSHOT_ID"
+
+            echo "Waiting for snapshot deletion to complete..."
+            aws rds wait db-snapshot-deleted \
+              --db-snapshot-identifier "$SNAPSHOT_ID" || true
+            echo "Snapshot deleted."
+          fi
+
       - name: Terraform Destroy
         working-directory: terraform
         run: |-
