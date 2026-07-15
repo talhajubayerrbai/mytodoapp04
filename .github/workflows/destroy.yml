@@ -31,15 +31,26 @@ jobs:
             -backend-config="region=${{ secrets.AWS_REGION }}" \
             -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate"
 
-      - name: Terraform Apply (disable RDS deletion protection)
-        working-directory: terraform
+      - name: Disable RDS deletion protection
         run: |
-          terraform apply -auto-approve \
-            -target=aws_db_instance.main \
-            -var="public_key=${{ secrets.SSH_PUBLIC_KEY }}" \
-            -var="private_key=${{ secrets.SSH_PRIVATE_KEY }}" \
-            -var="db_password=${{ secrets.DB_PASSWORD }}" \
-            -var="project_name=${{ secrets.PROJECT_NAME }}"
+          DB_ID="${{ secrets.PROJECT_NAME }}-db"
+
+          # Check current deletion-protection state
+          DELETION_PROTECTION=$(aws rds describe-db-instances \
+            --db-instance-identifier "$DB_ID" \
+            --query 'DBInstances[0].DeletionProtection' \
+            --output text 2>/dev/null || echo "FALSE")
+
+          if [ "$DELETION_PROTECTION" = "True" ] || [ "$DELETION_PROTECTION" = "TRUE" ] || [ "$DELETION_PROTECTION" = "true" ]; then
+            echo "Disabling deletion protection on $DB_ID..."
+            aws rds modify-db-instance \
+              --db-instance-identifier "$DB_ID" \
+              --no-deletion-protection \
+              --apply-immediately
+            echo "Deletion protection disabled."
+          else
+            echo "Deletion protection is already disabled on $DB_ID — skipping."
+          fi
 
       - name: Terraform Destroy
         working-directory: terraform
